@@ -1,4 +1,4 @@
-# Triarii Research — IoT Sensor Pipeline
+# IoT Data Ingestion & Microservice Manager
 
 A distributed IoT data pipeline built with **FastAPI**, **Redis**, and **Docker Compose**.  
 Three independent microservices handle ingestion, worker management, and auto-scaling recommendations.

@@ -1,0 +1,16 @@
+# Don't copy these into the Docker image build context
+tests/
+conftest.py
+requirements-test.txt
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.coverage
+htmlcov/
+venv/
+.venv/
+.env
+.env.*
+*.log
+.DS_Store

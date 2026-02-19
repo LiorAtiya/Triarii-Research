@@ -1,0 +1,68 @@
+version: "3.9"
+
+services:
+  ingestion_service:
+    build:
+      context: ./ingestion_service
+      dockerfile: Dockerfile
+    container_name: ingestion_service
+    ports:
+      - "8000:8000"
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker_manager:
+    build:
+      context: ./worker_manager_service
+      dockerfile: Dockerfile
+    container_name: worker_manager
+    ports:
+      - "8001:8001"
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 1
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  metrics_scaling:
+    build:
+      context: ./metrics_scaling_service
+      dockerfile: Dockerfile
+    container_name: metrics_scaling
+    ports:
+      - "8002:8002"
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      INGESTION_REDIS_DB: 0
+      WORKERS_REDIS_DB: 1
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  redis_data:

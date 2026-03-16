@@ -9,8 +9,13 @@ from app.models.sensor import (
     SensorReading,
     SensorReadingResponse,
 )
-from app.services import redis_service
 from app.core.config import settings
+from app.core.metrics import (
+    readings_duplicate_total,
+    readings_published_total,
+    readings_received_total,
+)
+from app.services import redis_service
 
 router = APIRouter(prefix="/api/v1/sensors", tags=["Sensors"])
 
@@ -26,6 +31,7 @@ router = APIRouter(prefix="/api/v1/sensors", tags=["Sensors"])
     description="Accept a sensor reading and persist it in Redis.",
 )
 async def ingest_sensor_data(reading: SensorReading) -> IngestResponse:
+    readings_received_total.labels(sensor_id=reading.sensor_id).inc()
     try:
         stored = await redis_service.publish_reading(reading)
     except Exception as exc:
@@ -33,6 +39,10 @@ async def ingest_sensor_data(reading: SensorReading) -> IngestResponse:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Failed to store reading: {exc}",
         )
+    if stored:
+        readings_published_total.inc()
+    else:
+        readings_duplicate_total.inc()
     return IngestResponse(
         status="ok" if stored else "duplicate",
         sensor_id=reading.sensor_id,

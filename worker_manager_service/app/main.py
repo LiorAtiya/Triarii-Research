@@ -1,14 +1,19 @@
 import asyncio
-import logging
 from contextlib import asynccontextmanager
 
+import structlog
 from fastapi import FastAPI
+from prometheus_fastapi_instrumentator import Instrumentator
 
 from app.core.config import settings
+from app.core.logging_config import setup_logging
+from app.core.tracing import setup_tracing
+from app.core.metrics import workers_marked_stale_total
 from app.routers import workers, metrics
 from app.services import redis_service
 
-logger = logging.getLogger(__name__)
+setup_logging()
+logger = structlog.get_logger(__name__)
 
 
 async def _stale_worker_cleanup_loop() -> None:
@@ -18,9 +23,10 @@ async def _stale_worker_cleanup_loop() -> None:
         try:
             marked = await redis_service.mark_stale_workers()
             if marked:
-                logger.info("Stale-worker cleanup: marked %d worker(s) as stale", marked)
-        except Exception:
-            logger.exception("Stale-worker cleanup failed")
+                workers_marked_stale_total.inc(marked)
+                logger.info("stale_workers_marked", count=marked)
+        except Exception as exc:
+            logger.exception("stale_worker_cleanup_failed", error=str(exc))
 
 
 @asynccontextmanager
@@ -42,8 +48,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+setup_tracing(app)
+
 app.include_router(workers.router)
 app.include_router(metrics.router)
+
+Instrumentator().instrument(app).expose(app)
 
 
 @app.get("/health", tags=["Health"])

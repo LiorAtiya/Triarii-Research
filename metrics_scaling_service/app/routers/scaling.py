@@ -2,6 +2,7 @@ import math
 from fastapi import APIRouter, HTTPException, status
 
 from app.core.config import settings
+from app.core.metrics import current_tps, scaling_active_workers, scaling_recommendations_total
 from app.models.metrics import ScalingAction, ScalingRecommendation
 from app.services import redis_service
 
@@ -64,6 +65,10 @@ async def scaling_recommendation() -> ScalingRecommendation:
             f"tps {tps:.2f} within normal range for "
             f"{effective_workers} workers → no action needed"
         )
+
+    scaling_recommendations_total.labels(action=action.value).inc()
+    current_tps.set(tps)
+    scaling_active_workers.set(active_workers)
 
     return ScalingRecommendation(
         current_throughput=tps,

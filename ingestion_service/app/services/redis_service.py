@@ -125,6 +125,13 @@ async def publish_reading(reading: SensorReading) -> bool:
     if not is_new:
         return False
 
+    # Inject current trace context so the stream consumer can link its span
+    # to the originating HTTP request span (cross-process propagation).
+    from opentelemetry import trace, propagate
+    from opentelemetry.propagators.textmap import DefaultGetter
+    carrier: dict = {}
+    propagate.inject(carrier)
+
     await client.xadd(
         STREAM_KEY,
         {
@@ -133,6 +140,7 @@ async def publish_reading(reading: SensorReading) -> bool:
             "timestamp": ts.isoformat(),
             "readings": json.dumps(reading.readings),
             "metadata": json.dumps(reading.metadata),
+            "trace_carrier": json.dumps(carrier),  # propagated trace context
         },
         maxlen=STREAM_MAX_LEN,
         approximate=True,

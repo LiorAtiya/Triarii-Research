@@ -7,6 +7,11 @@ from app.models.worker import (
     WorkerListResponse,
     WorkerResponse,
 )
+from app.core.metrics import (
+    worker_heartbeats_total,
+    workers_deregistered_total,
+    workers_registered_total,
+)
 from app.services import redis_service
 
 router = APIRouter(prefix="/api/v1/workers", tags=["Workers"])
@@ -50,6 +55,7 @@ async def register_worker(body: RegisterWorkerRequest) -> WorkerResponse:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Failed to register worker: {exc}",
         )
+    workers_registered_total.inc()
     return worker
 
 
@@ -75,6 +81,7 @@ async def deregister_worker(worker_id: str) -> DeregisterResponse:
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Worker '{worker_id}' not found.",
         )
+    workers_deregistered_total.inc()
     return DeregisterResponse(status="removed", worker_id=worker_id)
 
 
@@ -104,4 +111,5 @@ async def update_worker_health(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Worker '{worker_id}' not found.",
         )
+    worker_heartbeats_total.labels(worker_id=worker_id).inc()
     return worker

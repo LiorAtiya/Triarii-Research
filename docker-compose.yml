@@ -13,6 +13,7 @@ services:
       REDIS_PORT: 6379
       REDIS_DB: 0
       TIMESCALE_DSN: postgresql://iot:iot_secret@timescaledb:5432/iot_readings
+      OTEL_EXPORTER_ENDPOINT: http://jaeger:4317
     depends_on:
       redis:
         condition: service_healthy
@@ -31,6 +32,7 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: 6379
       REDIS_DB: 1
+      OTEL_EXPORTER_ENDPOINT: http://jaeger:4317
     depends_on:
       redis:
         condition: service_healthy
@@ -48,9 +50,51 @@ services:
       REDIS_PORT: 6379
       INGESTION_REDIS_DB: 0
       WORKERS_REDIS_DB: 1
+      OTEL_EXPORTER_ENDPOINT: http://jaeger:4317
     depends_on:
       redis:
         condition: service_healthy
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=7d"
+    depends_on:
+      - ingestion_service
+      - worker_manager
+      - metrics_scaling
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_DATASOURCES_DEFAULT_NAME: Prometheus
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: jaeger
+    ports:
+      - "16686:16686"  # Jaeger UI
+      - "4317:4317"    # OTLP gRPC receiver
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
     restart: unless-stopped
 
   timescaledb:
@@ -88,3 +132,5 @@ services:
 volumes:
   redis_data:
   timescale_data:
+  prometheus_data:
+  grafana_data:

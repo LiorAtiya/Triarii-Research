@@ -1,0 +1,16 @@
+global:
+  scrape_interval: 15s      # pull metrics every 15 seconds
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: ingestion_service
+    static_configs:
+      - targets: ["ingestion_service:8000"]
+
+  - job_name: worker_manager
+    static_configs:
+      - targets: ["worker_manager:8001"]
+
+  - job_name: metrics_scaling
+    static_configs:
+      - targets: ["metrics_scaling:8002"]

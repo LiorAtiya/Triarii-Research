@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     # TimescaleDB connection string (cold storage for historical readings)
     TIMESCALE_DSN: str = "postgresql://iot:iot_secret@localhost:5432/iot_readings"
 
+    # OpenTelemetry collector endpoint (Jaeger OTLP gRPC)
+    OTEL_EXPORTER_ENDPOINT: str = "http://jaeger:4317"
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

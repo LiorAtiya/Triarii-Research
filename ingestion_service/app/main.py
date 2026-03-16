@@ -3,10 +3,16 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from prometheus_fastapi_instrumentator import Instrumentator
+
 from app.core.config import settings
+from app.core.logging_config import setup_logging
+from app.core.tracing import setup_tracing
 from app.routers import sensors
 from app.services import redis_service, timescale_service
 from app.services import stream_consumer
+
+setup_logging()
 
 
 @asynccontextmanager
@@ -30,8 +36,14 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
+setup_tracing(app)
+
 # Register routers
 app.include_router(sensors.router)
+
+# Expose /metrics — HTTP metrics (latency, status codes) auto-instrumented
+# Business metrics (duplicates, stream events) are updated in sensors.py + stream_consumer.py
+Instrumentator().instrument(app).expose(app)
 
 
 @app.get("/health", tags=["Health"])

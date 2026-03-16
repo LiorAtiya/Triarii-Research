@@ -1,10 +1,15 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from prometheus_fastapi_instrumentator import Instrumentator
 
 from app.core.config import settings
+from app.core.logging_config import setup_logging
+from app.core.tracing import setup_tracing
 from app.routers import scaling
 from app.services import redis_service
+
+setup_logging()
 
 
 @asynccontextmanager
@@ -24,7 +29,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+setup_tracing(app)
+
 app.include_router(scaling.router)
+
+Instrumentator().instrument(app).expose(app)
 
 
 @app.get("/health", tags=["Health"])

@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     # Heartbeat freshness – workers with last_heartbeat older than this are not "active"
     WORKER_STALE_SECONDS: int = 30
 
+    # OpenTelemetry collector endpoint (Jaeger OTLP gRPC)
+    OTEL_EXPORTER_ENDPOINT: str = "http://jaeger:4317"
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     # How long to remember message_ids for deduplication (seconds)
     MESSAGE_DEDUP_TTL_SECONDS: int = 86400  # 24 hours
 
+    # TimescaleDB connection string (cold storage for historical readings)
+    TIMESCALE_DSN: str = "postgresql://iot:iot_secret@localhost:5432/iot_readings"
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

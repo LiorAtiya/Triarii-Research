@@ -12,8 +12,11 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: 6379
       REDIS_DB: 0
+      TIMESCALE_DSN: postgresql://iot:iot_secret@timescaledb:5432/iot_readings
     depends_on:
       redis:
+        condition: service_healthy
+      timescaledb:
         condition: service_healthy
     restart: unless-stopped
 
@@ -50,6 +53,24 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: timescaledb
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: iot
+      POSTGRES_PASSWORD: iot_secret
+      POSTGRES_DB: iot_readings
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U iot -d iot_readings"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
   redis:
     image: redis:7-alpine
     container_name: redis
@@ -66,3 +87,4 @@ services:
 
 volumes:
   redis_data:
+  timescale_data:

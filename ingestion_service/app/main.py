@@ -1,17 +1,23 @@
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
 from app.core.config import settings
 from app.routers import sensors
-from app.services import redis_service
+from app.services import redis_service, timescale_service
+from app.services import stream_consumer
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialise the Redis connection pool on startup; close it on shutdown."""
+    """Initialise Redis + TimescaleDB pools and stream consumer on startup."""
     await redis_service.init_pool()
+    await timescale_service.init_pool()
+    consumer_task = asyncio.create_task(stream_consumer.run())
     yield
+    consumer_task.cancel()
+    await timescale_service.close_pool()
     await redis_service.close_pool()
 
 

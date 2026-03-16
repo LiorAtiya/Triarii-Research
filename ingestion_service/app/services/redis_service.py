@@ -6,16 +6,35 @@ from typing import List
 from app.core.config import settings
 from app.models.sensor import SensorReading, SensorReadingResponse
 
+# ── Data flow ─────────────────────────────────────────────────────────────────
+#
+#  PATH 1 — API (synchronous, called by HTTP request):
+#    POST /sensors/data
+#      → publish_reading()       dedup check (SET NX) + XADD to stream
+#      → returns HTTP 201 immediately
+#
+#  PATH 2 — Message Broker (asynchronous, runs in background):
+#    stream_consumer.run()       XREADGROUP loop, one message at a time
+#      → persist_reading()       Lua script: ZADD + SADD + INCR + XACK
+#
+#  Adding more consumers (e.g. ML, alerts) means creating a new consumer group
+#  that reads from the same STREAM_KEY independently.
+#
 # ── Redis key layout ──────────────────────────────────────────────────────────
 # Sorted Set  sensor:{sensor_id}:readings   score = unix-ts, member = JSON blob
 # Set         sensors                        all known sensor IDs
 # String      throughput:{unix_second}       per-second ingestion counter (TTL)
 # String      dedup:{message_id}             sentinel key for dedup check (TTL)
+# Stream      sensors:stream                 incoming readings queue (XADD / XREADGROUP)
 # ─────────────────────────────────────────────────────────────────────────────
 
 SENSORS_SET_KEY = "sensors"
 THROUGHPUT_TTL_SECONDS = 3600  # keep per-second counters for 1 hour
 READINGS_RETENTION_SECONDS = 3600  # trim readings older than 1 hour
+STREAM_KEY = "sensors:stream"
+STREAM_MAX_LEN = 100_000  # cap stream length to avoid unbounded memory growth
+CONSUMER_GROUP = "ingestion-workers"
+CONSUMER_NAME = "consumer-1"
 
 # ── Connection pool (singleton, initialised via FastAPI lifespan) ─────────────
 _redis: aioredis.Redis | None = None
@@ -66,69 +85,110 @@ def _dedup_key(message_id: str) -> str:
 
 
 # ── Lua script ────────────────────────────────────────────────────────────────
-# Atomically: check dedup, write reading, register sensor, bump throughput.
-# Returns 0 if duplicate, 1 if stored.
+# Atomically: write reading, register sensor, bump throughput counter.
+# Dedup is handled before publishing to the stream, so it is not repeated here.
 #
-# KEYS: [1]=dedup_key  [2]=readings_key  [3]=sensors_key  [4]=throughput_key
-# ARGV: [1]=dedup_ttl  [2]=timestamp_score  [3]=payload
-#       [4]=cutoff_score  [5]=sensor_id  [6]=throughput_ttl
+# KEYS: [1]=readings_key  [2]=sensors_key  [3]=throughput_key
+# ARGV: [1]=timestamp_score  [2]=payload  [3]=cutoff_score
+#       [4]=sensor_id  [5]=throughput_ttl
 _STORE_SCRIPT = """
-local is_new = redis.call('SET', KEYS[1], '1', 'NX', 'EX', ARGV[1])
-if is_new == false then
-    return 0
-end
-redis.call('ZADD', KEYS[2], ARGV[2], ARGV[3])
-redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', ARGV[4])
-redis.call('SADD', KEYS[3], ARGV[5])
-redis.call('INCR', KEYS[4])
-redis.call('EXPIRE', KEYS[4], ARGV[6])
+redis.call('ZADD', KEYS[1], ARGV[1], ARGV[2])
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[3])
+redis.call('SADD', KEYS[2], ARGV[4])
+redis.call('INCR', KEYS[3])
+redis.call('EXPIRE', KEYS[3], ARGV[5])
 return 1
 """
 
 
-# ── Store ─────────────────────────────────────────────────────────────────────
+# ── Publish (API layer) ───────────────────────────────────────────────────────
 
 
-async def store_reading(reading: SensorReading) -> bool:
-    """Persist a sensor reading and bump the throughput counter.
+async def publish_reading(reading: SensorReading) -> bool:
+    """Push a sensor reading onto the Redis Stream for async processing.
 
-    Returns True if the reading was stored, False if it was a duplicate.
+    Returns True if enqueued, False if the message_id was already seen (duplicate).
 
-    Executes a Lua script so that the dedup check, ZADD, SADD, and INCR
-    are one atomic operation — no partial writes if the process crashes mid-way.
+    The dedup check (SET NX) happens here so the HTTP response is immediate.
+    The actual ZADD / SADD / INCR happen inside the stream consumer.
     """
     client = get_pool()
 
     ts = reading.timestamp or datetime.now(timezone.utc)
-    timestamp_score = ts.timestamp()
+    reading.timestamp = ts  # resolve once; consumer will reuse this value
 
-    payload = json.dumps(
+    # Fast duplicate check — if the key already exists, drop the message now
+    is_new = await client.set(
+        _dedup_key(reading.message_id), "1",
+        nx=True, ex=settings.MESSAGE_DEDUP_TTL_SECONDS,
+    )
+    if not is_new:
+        return False
+
+    await client.xadd(
+        STREAM_KEY,
         {
             "sensor_id": reading.sensor_id,
+            "message_id": reading.message_id,
             "timestamp": ts.isoformat(),
-            "readings": reading.readings,
-            "metadata": reading.metadata,
+            "readings": json.dumps(reading.readings),
+            "metadata": json.dumps(reading.metadata),
+        },
+        maxlen=STREAM_MAX_LEN,
+        approximate=True,
+    )
+    return True
+
+
+# ── Persist (consumer layer) ──────────────────────────────────────────────────
+
+
+async def persist_reading(
+    sensor_id: str,
+    timestamp_iso: str,
+    readings_json: str,
+    metadata_json: str,
+) -> None:
+    """Write one reading from the stream into the Sorted Set + counters.
+
+    Called by the stream consumer after a message is successfully read.
+    Executes the Lua script so all writes are atomic.
+    """
+    client = get_pool()
+
+    ts = datetime.fromisoformat(timestamp_iso)
+    timestamp_score = ts.timestamp()
+    payload = json.dumps(
+        {
+            "sensor_id": sensor_id,
+            "timestamp": timestamp_iso,
+            "readings": json.loads(readings_json),
+            "metadata": json.loads(metadata_json),
         }
     )
 
-    result = await client.eval(
+    await client.eval(
         _STORE_SCRIPT,
-        4,  # number of KEYS
-        _dedup_key(reading.message_id),       # KEYS[1]
-        _readings_key(reading.sensor_id),     # KEYS[2]
-        SENSORS_SET_KEY,                      # KEYS[3]
-        _throughput_key(ts),                  # KEYS[4]
-        settings.MESSAGE_DEDUP_TTL_SECONDS,   # ARGV[1]
-        timestamp_score,                      # ARGV[2]
-        payload,                              # ARGV[3]
-        timestamp_score - READINGS_RETENTION_SECONDS,  # ARGV[4]
-        reading.sensor_id,                    # ARGV[5]
-        THROUGHPUT_TTL_SECONDS,               # ARGV[6]
+        3,  # number of KEYS (no dedup key — already checked in publish_reading)
+        _readings_key(sensor_id),                      # KEYS[1]
+        SENSORS_SET_KEY,                               # KEYS[2]
+        _throughput_key(ts),                           # KEYS[3]
+        timestamp_score,                               # ARGV[1]
+        payload,                                       # ARGV[2]
+        timestamp_score - READINGS_RETENTION_SECONDS,  # ARGV[3]
+        sensor_id,                                     # ARGV[4]
+        THROUGHPUT_TTL_SECONDS,                        # ARGV[5]
     )
 
-    if result == 1:
-        reading.timestamp = ts
-    return result == 1
+
+async def ensure_consumer_group() -> None:
+    """Create the consumer group if it does not exist yet."""
+    client = get_pool()
+    try:
+        await client.xgroup_create(STREAM_KEY, CONSUMER_GROUP, id="0", mkstream=True)
+    except Exception as exc:
+        if "BUSYGROUP" not in str(exc):
+            raise
 
 
 # ── Query ─────────────────────────────────────────────────────────────────────

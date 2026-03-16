@@ -125,6 +125,8 @@ async def list_workers() -> List[WorkerResponse]:
     for every iteration.
     """
     client = get_workers_pool()
+    # SMEMBERS is O(n) but acceptable here — MAX_WORKERS is capped at 10.
+    # Replace with SSCAN if the worker ceiling grows beyond ~10,000.
     worker_ids = await client.smembers(WORKERS_SET)
     if not worker_ids:
         return []

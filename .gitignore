@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 *.pyd
 .Python
+CLAUDE.md
 
 # ── Virtual environments ──────────────────────────────────────────────────────
 venv/

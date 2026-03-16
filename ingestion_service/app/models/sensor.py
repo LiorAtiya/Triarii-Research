@@ -1,3 +1,4 @@
+import uuid
 from pydantic import BaseModel, Field
 from typing import Any, Dict, Optional, List
 from datetime import datetime
@@ -7,6 +8,10 @@ class SensorReading(BaseModel):
     """Payload sent by an IoT sensor."""
 
     sensor_id: str = Field(..., description="Unique identifier for the sensor")
+    message_id: str = Field(
+        default_factory=lambda: str(uuid.uuid4()),
+        description="Unique message ID for idempotent ingestion. A UUID is generated automatically if omitted.",
+    )
     timestamp: Optional[datetime] = Field(
         default=None,
         description="UTC timestamp of the reading. Defaults to server time if omitted.",
@@ -25,6 +30,7 @@ class SensorReading(BaseModel):
         "json_schema_extra": {
             "example": {
                 "sensor_id": "sensor-001",
+                "message_id": "550e8400-e29b-41d4-a716-446655440000",
                 "timestamp": "2024-01-15T10:30:00Z",
                 "readings": {"temperature": 23.5, "humidity": 65.2},
                 "metadata": {"location": "warehouse-A", "device_type": "DHT22"},

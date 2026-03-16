@@ -10,10 +10,12 @@ from app.models.sensor import SensorReading, SensorReadingResponse
 # Sorted Set  sensor:{sensor_id}:readings   score = unix-ts, member = JSON blob
 # Set         sensors                        all known sensor IDs
 # String      throughput:{unix_second}       per-second ingestion counter (TTL)
+# String      dedup:{message_id}             sentinel key for dedup check (TTL)
 # ─────────────────────────────────────────────────────────────────────────────
 
 SENSORS_SET_KEY = "sensors"
 THROUGHPUT_TTL_SECONDS = 3600  # keep per-second counters for 1 hour
+READINGS_RETENTION_SECONDS = 3600  # trim readings older than 1 hour
 
 # ── Connection pool (singleton, initialised via FastAPI lifespan) ─────────────
 _redis: aioredis.Redis | None = None
@@ -59,20 +61,44 @@ def _throughput_key(ts: datetime) -> str:
     return f"throughput:{int(ts.timestamp())}"
 
 
+def _dedup_key(message_id: str) -> str:
+    return f"dedup:{message_id}"
+
+
+# ── Lua script ────────────────────────────────────────────────────────────────
+# Atomically: check dedup, write reading, register sensor, bump throughput.
+# Returns 0 if duplicate, 1 if stored.
+#
+# KEYS: [1]=dedup_key  [2]=readings_key  [3]=sensors_key  [4]=throughput_key
+# ARGV: [1]=dedup_ttl  [2]=timestamp_score  [3]=payload
+#       [4]=cutoff_score  [5]=sensor_id  [6]=throughput_ttl
+_STORE_SCRIPT = """
+local is_new = redis.call('SET', KEYS[1], '1', 'NX', 'EX', ARGV[1])
+if is_new == false then
+    return 0
+end
+redis.call('ZADD', KEYS[2], ARGV[2], ARGV[3])
+redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', ARGV[4])
+redis.call('SADD', KEYS[3], ARGV[5])
+redis.call('INCR', KEYS[4])
+redis.call('EXPIRE', KEYS[4], ARGV[6])
+return 1
+"""
+
+
 # ── Store ─────────────────────────────────────────────────────────────────────
 
 
-async def store_reading(reading: SensorReading) -> None:
+async def store_reading(reading: SensorReading) -> bool:
     """Persist a sensor reading and bump the throughput counter.
 
-    * Sorted-set member is a JSON blob; score is the UNIX timestamp.
-    * The ``sensors`` set tracks every known sensor_id.
-    * A per-second counter (``throughput:{unix_second}``) is incremented
-      so the metrics service can query ingestion rate.
+    Returns True if the reading was stored, False if it was a duplicate.
+
+    Executes a Lua script so that the dedup check, ZADD, SADD, and INCR
+    are one atomic operation — no partial writes if the process crashes mid-way.
     """
     client = get_pool()
 
-    # Default timestamp to now (UTC) if the caller didn't provide one
     ts = reading.timestamp or datetime.now(timezone.utc)
     timestamp_score = ts.timestamp()
 
@@ -85,17 +111,24 @@ async def store_reading(reading: SensorReading) -> None:
         }
     )
 
-    tp_key = _throughput_key(ts)
+    result = await client.eval(
+        _STORE_SCRIPT,
+        4,  # number of KEYS
+        _dedup_key(reading.message_id),       # KEYS[1]
+        _readings_key(reading.sensor_id),     # KEYS[2]
+        SENSORS_SET_KEY,                      # KEYS[3]
+        _throughput_key(ts),                  # KEYS[4]
+        settings.MESSAGE_DEDUP_TTL_SECONDS,   # ARGV[1]
+        timestamp_score,                      # ARGV[2]
+        payload,                              # ARGV[3]
+        timestamp_score - READINGS_RETENTION_SECONDS,  # ARGV[4]
+        reading.sensor_id,                    # ARGV[5]
+        THROUGHPUT_TTL_SECONDS,               # ARGV[6]
+    )
 
-    async with client.pipeline(transaction=True) as pipe:
-        pipe.zadd(_readings_key(reading.sensor_id), {payload: timestamp_score})
-        pipe.sadd(SENSORS_SET_KEY, reading.sensor_id)
-        pipe.incr(tp_key)
-        pipe.expire(tp_key, THROUGHPUT_TTL_SECONDS)
-        await pipe.execute()
-
-    # Store the resolved timestamp back so the router can return it
-    reading.timestamp = ts
+    if result == 1:
+        reading.timestamp = ts
+    return result == 1
 
 
 # ── Query ─────────────────────────────────────────────────────────────────────

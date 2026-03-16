@@ -27,14 +27,14 @@ router = APIRouter(prefix="/api/v1/sensors", tags=["Sensors"])
 )
 async def ingest_sensor_data(reading: SensorReading) -> IngestResponse:
     try:
-        await redis_service.store_reading(reading)
+        stored = await redis_service.store_reading(reading)
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Failed to store reading: {exc}",
         )
     return IngestResponse(
-        status="ok",
+        status="ok" if stored else "duplicate",
         sensor_id=reading.sensor_id,
         timestamp=reading.timestamp,
     )

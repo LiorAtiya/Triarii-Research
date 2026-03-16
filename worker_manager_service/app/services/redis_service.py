@@ -1,7 +1,7 @@
 import time
 import uuid
 import redis.asyncio as aioredis
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 
 from app.core.config import settings
@@ -184,6 +184,44 @@ async def update_health(
     # Return the full refreshed object
     raw = await client.hgetall(_worker_key(worker_id))
     return _row_to_response(raw)
+
+
+# ── Stale-worker cleanup ──────────────────────────────────────────────────────
+
+
+async def mark_stale_workers() -> int:
+    """Scan all workers and set status=stale for any whose last_heartbeat is too old.
+
+    Returns the number of workers that were marked stale in this pass.
+    """
+    client = get_workers_pool()
+    worker_ids = await client.smembers(WORKERS_SET)
+    if not worker_ids:
+        return 0
+
+    stale_cutoff = datetime.now(timezone.utc) - timedelta(seconds=settings.WORKER_STALE_SECONDS)
+
+    async with client.pipeline(transaction=False) as pipe:
+        for wid in worker_ids:
+            pipe.hget(_worker_key(wid), "last_heartbeat")
+        heartbeats = await pipe.execute()
+
+    stale_ids = []
+    for wid, hb_raw in zip(worker_ids, heartbeats):
+        if hb_raw:
+            try:
+                if datetime.fromisoformat(hb_raw) < stale_cutoff:
+                    stale_ids.append(wid)
+            except (ValueError, TypeError):
+                pass
+
+    if stale_ids:
+        async with client.pipeline(transaction=False) as pipe:
+            for wid in stale_ids:
+                pipe.hset(_worker_key(wid), "status", WorkerStatus.STALE.value)
+            await pipe.execute()
+
+    return len(stale_ids)
 
 
 # ── Metrics ───────────────────────────────────────────────────────────────────

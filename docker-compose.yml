@@ -95,6 +95,12 @@ services:
       - "4317:4317"    # OTLP gRPC receiver
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
+      SPAN_STORAGE_TYPE: badger
+      BADGER_EPHEMERAL: "false"
+      BADGER_DIRECTORY_VALUE: /badger/data
+      BADGER_DIRECTORY_KEY: /badger/key
+    volumes:
+      - jaeger_data:/badger
     restart: unless-stopped
 
   timescaledb:
@@ -113,6 +119,25 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:latest
+    container_name: loki
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    restart: unless-stopped
+
+  promtail:
+    image: grafana/promtail:latest
+    container_name: promtail
+    volumes:
+      - ./monitoring/promtail.yml:/etc/promtail/config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      - loki
     restart: unless-stopped
 
   redis:
@@ -134,3 +159,5 @@ volumes:
   timescale_data:
   prometheus_data:
   grafana_data:
+  loki_data:
+  jaeger_data:
